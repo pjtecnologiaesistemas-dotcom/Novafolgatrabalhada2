@@ -6,7 +6,7 @@
 <title>Nova Folga Trabalhada (FT)</title>
 
 <!-- ── PWA ── -->
-<link rel="manifest" href="/Novafolgatrabalhada2/manifest.json">
+<link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#f7b731">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -15,10 +15,9 @@
 <script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function() {
-      // Registra o SW principal (PWA + cache)
-      navigator.serviceWorker.register('/Novafolgatrabalhada2/service-worker.js')
-        .then(function(reg) { console.log('[SW] Registrado:', reg.scope); })
-        .catch(function(err) { console.warn('[SW] Falhou:', err); });
+      navigator.serviceWorker.register('./service-worker.js')
+        .then(function(reg) { console.log('SW registrado:', reg.scope); })
+        .catch(function(err) { console.warn('SW falhou:', err); });
     });
   }
 </script>
@@ -485,7 +484,7 @@
     font-size: .9rem;
     opacity: 0;
     transition: transform .35s cubic-bezier(.34,1.56,.64,1), opacity .35s;
-    z-index: 999;
+    z-index: 10000;
     white-space: nowrap;
     max-width: 90vw;
     text-align: center;
@@ -1988,7 +1987,7 @@
   <!-- Badges / indicadores -->
   <div id="header-badges">
     <button class="btn-novo-ciclo" onclick="abrirModalNovoCiclo()">🔄 Novo Ciclo</button>
-    <button class="btn-novo-ciclo" onclick="(window.FTAlertEngine && window.FTAlertEngine.openConfig ? window.FTAlertEngine.openConfig() : (document.getElementById('ft-config-overlay') && (document.getElementById('ft-config-overlay').style.display='flex')))" style="background:linear-gradient(135deg,#45aaf2,#2d98da)">
+    <button class="btn-novo-ciclo" onclick="(window.FT_AlertCheck && window.FT_AlertCheck.openConfig ? window.FT_AlertCheck.openConfig() : (document.getElementById('ft-config-overlay') && (document.getElementById('ft-config-overlay').style.display='flex')))" style="background:linear-gradient(135deg,#45aaf2,#2d98da)">
       ⚙️ Alertas
     </button>
     <div class="badge-auto">&#x1F4BE; Offline-first</div>
@@ -7234,8 +7233,8 @@ var FIRESTORE_DOC_ID     = 'dados';
           if (typeof window._ftAlertRender === 'function') {
             try { window._ftAlertRender(); } catch(e) {}
           }
-          if (typeof window.updateHeaderBadge === 'function') {
-            try { window.updateHeaderBadge(); } catch(e) {}
+          if (typeof window._ftUpdateBadge === 'function') {
+            try { window._ftUpdateBadge(); } catch(e) {}
           }
         }
 
@@ -7265,133 +7264,14 @@ var FIRESTORE_DOC_ID     = 'dados';
     console.log('[FirebaseSync] ✅ Conectado ao Firestore:', FIREBASE_CONFIG.projectId);
   }
 
-  // Carrega SDKs do Firebase em sequência e inicializa (inclui Messaging para FCM)
+  // Carrega SDKs do Firebase em sequência e inicializa
   loadScript('https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js', function () {
     loadScript('https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js', function () {
-      loadScript('https://www.gstatic.com/firebasejs/9.22.2/firebase-messaging-compat.js', function () {
-        initFirebase();
-      });
+      initFirebase();
     });
   });
 }());
 
-</script>
-
-<!-- ════════════════════════════════════════════════════════
-     MÓDULO FCM — Push Notifications
-     ════════════════════════════════════════════════════════ -->
-<script>
-(function() {
-  'use strict';
-
-  var FCM_VAPID_KEY = 'BMgKsmT6xKVi31eLONnEgAmNS1d4FG6bnLMSjP6XFjqXDTwLWZcRBldPv6XodyGAlsc0wtXe7JCcNY3jLD-oyDA';
-  var FCM_COLLECTION = 'folga_trabalhada';
-  var FCM_DOC        = 'dados';
-
-  // Exibe notificação local via Web Notifications API
-  function triggerPushForPendencias(pendencias) {
-    if (!pendencias || !pendencias.length) return;
-    if (!('Notification' in window) || Notification.permission !== 'granted') return;
-    var count = pendencias.length;
-    var title = count === 1 ? '⚠️ 1 Pendência de FT' : ('⚠️ ' + count + ' Pendências de FT');
-    var body  = 'Toque para registrar a Folga Trabalhada.';
-    try {
-      new Notification(title, {
-        body:    body,
-        icon:    '/icon-192.png',
-        badge:   '/icon-72.png',
-        tag:     'ft-alert',
-        renotify: true
-      });
-    } catch(e) { console.warn('[FCM] Notification local error:', e); }
-  }
-  window._ftTriggerPush = triggerPushForPendencias;
-
-  // Salva token FCM no Firestore (array de dispositivos)
-  function saveFCMToken(token) {
-    try {
-      if (typeof firebase === 'undefined') return;
-      var db = firebase.firestore();
-      db.collection(FCM_COLLECTION).doc(FCM_DOC).set({
-        fcm_tokens: firebase.firestore.FieldValue.arrayUnion({
-          token:      token,
-          deviceInfo: navigator.userAgent.substring(0, 150),
-          lastUpdated: Date.now()
-        })
-      }, { merge: true }).catch(function(e){ console.warn('[FCM] Falha ao salvar token:', e); });
-    } catch(e) { console.warn('[FCM] saveFCMToken error:', e); }
-  }
-
-  // Inicializa FCM e pede permissão de notificação
-  function initPushNotifications() {
-    try {
-      if (typeof firebase === 'undefined' || !firebase.messaging) return;
-      var msg = firebase.messaging();
-      Notification.requestPermission().then(function(permission) {
-        if (permission !== 'granted') {
-          console.log('[FCM] Permissão negada');
-          return;
-        }
-        msg.getToken({ vapidKey: FCM_VAPID_KEY }).then(function(token) {
-          if (token) {
-            console.log('[FCM] ✅ Token obtido');
-            saveFCMToken(token);
-          }
-        }).catch(function(e){ console.warn('[FCM] getToken error:', e); });
-
-        // Escuta mensagens em foreground
-        msg.onMessage(function(payload) {
-          console.log('[FCM] Mensagem em foreground:', payload);
-          var n = (payload.notification) || {};
-          try {
-            new Notification(n.title || '⚠️ FT Alert', {
-              body:    n.body  || 'Você tem pendências!',
-              icon:    '/icon-192.png',
-              badge:   '/icon-72.png',
-              tag:     'ft-push',
-              renotify: true
-            });
-          } catch(e2) {}
-        });
-      }).catch(function(e){ console.warn('[FCM] requestPermission error:', e); });
-    } catch(e) { console.warn('[FCM] initPushNotifications error:', e); }
-  }
-
-  // Hook: após o módulo de alertas expor _ftCheckAndAlert, wrappeia para disparar push
-  function hookAlertModule() {
-    var orig = window._ftCheckAndAlert;
-    window._ftCheckAndAlert = function() {
-      if (typeof orig === 'function') orig();
-      // Dispara push local se há pendências
-      setTimeout(function() {
-        try {
-          if (typeof window._ftGetPendencias === 'function') {
-            var p = window._ftGetPendencias();
-            if (p && p.length) triggerPushForPendencias(p);
-          }
-        } catch(e) {}
-      }, 600);
-    };
-  }
-
-  // Aguarda Firebase carregar e então inicializa FCM
-  function waitFirebaseAndInit() {
-    if (typeof firebase !== 'undefined' && firebase.apps && firebase.apps.length) {
-      setTimeout(initPushNotifications, 800);
-      hookAlertModule();
-    } else {
-      setTimeout(waitFirebaseAndInit, 500);
-    }
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function(){ setTimeout(waitFirebaseAndInit, 1000); });
-  } else {
-    setTimeout(waitFirebaseAndInit, 1000);
-  }
-
-  console.log('[FCM] Módulo de Push Notifications carregado');
-}());
 </script>
 
 <!-- ════════════════════════════════════════════════════════
@@ -7638,6 +7518,7 @@ var FIRESTORE_DOC_ID     = 'dados';
               ✔ Salvar
             </button>
           </div>
+          <div id="ft-escala-aviso-inline" style="display:none;font-size:.75rem;color:#fc5c65;font-weight:700;margin-bottom:8px;"></div>
           <div style="font-size:.72rem;color:#8b97b0;">💡 Saída após meia-noite (ex: 18:00→06:00) é detectada automaticamente.</div>
         </div>
 
@@ -7873,6 +7754,35 @@ var FIRESTORE_DOC_ID     = 'dados';
     updateHeaderBadge();
   }
 
+  /* ── Limpa dados órfãos ao remover um posto monitorado ───
+     Evita que um posto recriado com o mesmo nome "herde"
+     toggles/escala antigos que ficariam perdidos no cfg/localStorage. ── */
+  function limparDadosOrfaosPosto(posto) {
+    var cfg = loadConfig();
+    var mudouCfg = false;
+    if (cfg.postosInativos && (posto in cfg.postosInativos)) {
+      delete cfg.postosInativos[posto]; mudouCfg = true;
+    }
+    if (cfg.postosTurnoInativo) {
+      if ((posto + '__dia') in cfg.postosTurnoInativo)   { delete cfg.postosTurnoInativo[posto + '__dia'];   mudouCfg = true; }
+      if ((posto + '__noite') in cfg.postosTurnoInativo) { delete cfg.postosTurnoInativo[posto + '__noite']; mudouCfg = true; }
+    }
+    if (cfg.postosEscalaDia && (posto in cfg.postosEscalaDia)) {
+      delete cfg.postosEscalaDia[posto]; mudouCfg = true;
+    }
+    if (mudouCfg) saveConfig(cfg);
+
+    // Remove escala customizada associada a este posto (não mexe nas escalas hardcoded padrão)
+    var custom = loadEscalasCustom();
+    var normPosto = norm(posto);
+    var chavesRemover = [];
+    for (var k in custom) { if (norm(k) === normPosto) chavesRemover.push(k); }
+    if (chavesRemover.length) {
+      chavesRemover.forEach(function (k) { delete custom[k]; delete ESCALAS_POSTOS[k]; });
+      saveEscalasCustom(custom);
+    }
+  }
+
   /* ── Helpers de escala par/ímpar por posto ──────────────── */
   // Valores: 'todo' (padrão), 'par', 'impar'
   function getEscalaDiaPosto(cfg, posto) {
@@ -8020,6 +7930,19 @@ var FIRESTORE_DOC_ID     = 'dados';
     return (h >= 6 && h < 16) ? 'dia' : 'noite';
   }
 
+  /* Verifica se hReg está dentro da janela ±tolerancia horas de hEntrada,
+     tratando corretamente a virada da meia-noite (ex: entrada 23h ou 00h),
+     onde uma comparação linear (hMin/hMax) quebraria nos extremos 24/-1. */
+  function horaDentroJanela(hReg, hEntrada, tolerancia) {
+    if (hReg < 0) return false;
+    tolerancia = (tolerancia === undefined) ? 1 : tolerancia;
+    for (var d = -tolerancia; d <= tolerancia; d++) {
+      var alvo = ((hEntrada + d) % 24 + 24) % 24;
+      if (alvo === hReg) return true;
+    }
+    return false;
+  }
+
   /* ── Verifica pendências ───────────────────────────────── */
   function getPendencias() {
     var cfg       = loadConfig();
@@ -8049,17 +7972,14 @@ var FIRESTORE_DOC_ID     = 'dados';
 
         /* Hora de entrada do turno ativo segundo a escala (ex: 16 na sexta) */
         var hEntrada = Math.floor(turno.entrada / 60);
-        /* Intervalo tolerado: ±1h da entrada cadastrada na escala */
-        var hMin = hEntrada - 1;
-        var hMax = hEntrada + 1;
 
         var temFT = registros.some(function (r) {
           if (norm(r.posto) !== norm(posto)) return false;
           var data = (r.dataHora || r.data || '').slice(0, 10);
           if (data !== turno.dataRef) return false;
-          /* Compara pelo horário de início do registro com a entrada do turno (±1h) */
+          /* Compara pelo horário de início do registro com a entrada do turno (±1h, com virada de meia-noite) */
           var hReg = extrairHoraInicio(r.horario || r.turno || '');
-          return hReg >= hMin && hReg <= hMax;
+          return horaDentroJanela(hReg, hEntrada, 1);
         });
 
         if (!temFT) pendencias.push(turno);
@@ -8255,11 +8175,14 @@ var FIRESTORE_DOC_ID     = 'dados';
     try { localStorage.setItem(LS_ESCALAS_CUSTOM, JSON.stringify(obj)); } catch(e) {}
   }
 
-  // Converte string "HH:MM" em minutos
+  // Converte string "HH:MM" em minutos (tolera espaços e ":" largo de alguns teclados)
   function horaParaMin(str) {
-    var m = String(str || '').match(/^(\d{1,2}):(\d{2})$/);
+    var s = String(str || '').trim().replace(/：/g, ':').replace(/\s+/g, '');
+    var m = s.match(/^(\d{1,2}):(\d{2})$/);
     if (!m) return -1;
-    return parseInt(m[1],10)*60 + parseInt(m[2],10);
+    var hh = parseInt(m[1],10), mm = parseInt(m[2],10);
+    if (hh > 23 || mm > 59) return -1;
+    return hh*60 + mm;
   }
 
   // Mescla ESCALAS_POSTOS hardcoded com as customizadas do localStorage
@@ -8414,12 +8337,18 @@ var FIRESTORE_DOC_ID     = 'dados';
     var periodo = periodoEl.value;
 
     if (eMin < 0) {
-      if (typeof window.showToast === 'function') window.showToast('⚠️ Hora de entrada inválida. Use HH:MM.', 'error');
+      var msgE = '⚠️ Hora de entrada inválida. Use HH:MM (ex: 18:00).';
+      if (typeof window.showToast === 'function') window.showToast(msgE, 'error');
+      var avisoE = document.getElementById('ft-escala-aviso-inline');
+      if (avisoE) { avisoE.textContent = msgE; avisoE.style.display = 'block'; }
       entradaEl.style.borderColor = '#fc5c65'; setTimeout(function(){ entradaEl.style.borderColor=''; }, 2000);
       return;
     }
     if (sMin < 0) {
-      if (typeof window.showToast === 'function') window.showToast('⚠️ Hora de saída inválida. Use HH:MM.', 'error');
+      var msgS = '⚠️ Hora de saída inválida. Use HH:MM (ex: 06:00).';
+      if (typeof window.showToast === 'function') window.showToast(msgS, 'error');
+      var avisoS = document.getElementById('ft-escala-aviso-inline');
+      if (avisoS) { avisoS.textContent = msgS; avisoS.style.display = 'block'; }
       saidaEl.style.borderColor = '#fc5c65'; setTimeout(function(){ saidaEl.style.borderColor=''; }, 2000);
       return;
     }
@@ -8433,6 +8362,8 @@ var FIRESTORE_DOC_ID     = 'dados';
     saidaEl.value   = '';
     renderEscalaDiasList(postoNome);
     updateHeaderBadge();
+    var avisoOk = document.getElementById('ft-escala-aviso-inline');
+    if (avisoOk) avisoOk.style.display = 'none';
     if (typeof window.showToast === 'function') window.showToast('✅ Turno adicionado!', 'success');
   }
 
@@ -8447,6 +8378,49 @@ var FIRESTORE_DOC_ID     = 'dados';
 
   function initEscalaEditor() {
     renderEscalaSelectPostos();
+
+    // Mostra um aviso visível (não só toast, que pode passar despercebido)
+    // logo abaixo do botão de Adicionar Turno.
+    function avisoEscala(msg) {
+      if (typeof window.showToast === 'function') window.showToast(msg, 'error');
+      var el = document.getElementById('ft-escala-aviso-inline');
+      if (el) {
+        el.textContent = msg;
+        el.style.display = 'block';
+        clearTimeout(el._hideTimer);
+        el._hideTimer = setTimeout(function(){ el.style.display = 'none'; }, 4000);
+      }
+    }
+
+    // Garante que o turno/escala editados batem com o posto atualmente
+    // selecionado no dropdown. Em vez de bloquear silenciosamente quando o
+    // estado interno (_escalaPosToEdit) está desatualizado, agora usa o
+    // valor atual do <select> como fonte da verdade e resincroniza sozinho.
+    function getPostoEmEdicaoValidado() {
+      var selEl = document.getElementById('ft-escala-select-posto');
+      var selecionado = (selEl && selEl.value) || '';
+
+      // Se o editor não foi aberto ainda, mas já existe um posto selecionado
+      // no dropdown, abre o editor automaticamente para esse posto.
+      if (!_escalaPosToEdit && selecionado) {
+        renderEscalaDiasList(selecionado);
+        return _escalaPosToEdit || selecionado;
+      }
+
+      if (!_escalaPosToEdit && !selecionado) {
+        avisoEscala('⚠️ Selecione um posto antes de adicionar o turno.');
+        return null;
+      }
+
+      // Se o usuário trocou o posto no dropdown sem clicar em "Editar" de
+      // novo, resincroniza automaticamente para o posto selecionado.
+      if (selecionado && norm(selecionado) !== norm(_escalaPosToEdit)) {
+        renderEscalaDiasList(selecionado);
+        return selecionado;
+      }
+
+      return _escalaPosToEdit || selecionado;
+    }
 
     var btnVer = document.getElementById('ft-escala-btn-ver');
     if (btnVer) {
@@ -8463,22 +8437,24 @@ var FIRESTORE_DOC_ID     = 'dados';
     var btnAdd = document.getElementById('ft-escala-btn-add-turno');
     if (btnAdd) {
       btnAdd.addEventListener('click', function() {
-        if (!_escalaPosToEdit) return;
-        adicionarTurnoEscala(_escalaPosToEdit);
+        var posto = getPostoEmEdicaoValidado();
+        if (!posto) return;
+        adicionarTurnoEscala(posto);
       });
     }
 
     var btnLimpar = document.getElementById('ft-escala-btn-limpar');
     if (btnLimpar) {
       btnLimpar.addEventListener('click', function() {
-        if (!_escalaPosToEdit) return;
-        if (!confirm('Remover toda a escala de "' + _escalaPosToEdit + '"?')) return;
+        var posto = getPostoEmEdicaoValidado();
+        if (!posto) return;
+        if (!confirm('Remover toda a escala de "' + posto + '"?')) return;
         var custom = loadEscalasCustom();
-        delete custom[_escalaPosToEdit];
+        delete custom[posto];
         // Remove do ESCALAS_POSTOS em memória também
-        delete ESCALAS_POSTOS[_escalaPosToEdit];
+        delete ESCALAS_POSTOS[posto];
         saveEscalasCustom(custom);
-        renderEscalaDiasList(_escalaPosToEdit);
+        renderEscalaDiasList(posto);
         updateHeaderBadge();
         if (typeof window.showToast === 'function') window.showToast('🗑️ Escala removida.', 'success');
       });
@@ -8594,7 +8570,7 @@ var FIRESTORE_DOC_ID     = 'dados';
       btnDel.type = 'button';
       btnDel.style.cssText = 'border:none;background:rgba(139,151,176,.1);color:#8b97b0;border-radius:7px;padding:3px 7px;font-size:.78rem;font-weight:700;cursor:pointer;';
       btnDel.textContent = '\u2715';
-      btnDel.onclick = function () { cfg.postos.splice(idx, 1); saveConfig(cfg); renderConfigPostos(); updateHeaderBadge(); };
+      btnDel.onclick = function () { cfg.postos.splice(idx, 1); saveConfig(cfg); limparDadosOrfaosPosto(posto); renderConfigPostos(); renderEscalaSelectPostos(); updateHeaderBadge(); };
 
       linha1.appendChild(lbl);
       linha1.appendChild(btnDia2);
@@ -8681,30 +8657,34 @@ var FIRESTORE_DOC_ID     = 'dados';
       var val   = (input.value || '').trim();
       if (!val) return;
       var cfg = loadConfig();
-      if (cfg.postos.indexOf(val) === -1) {
-        cfg.postos.push(val);
-        saveConfig(cfg);
-
-        /* ── Garante escala padrão 24h para postos adicionados sem escala ── */
-        var temEscala = false;
-        var normValCfg = norm(val);
-        for (var k in ESCALAS_POSTOS) {
-          if (norm(k) === normValCfg) { temEscala = true; break; }
-        }
-        if (!temEscala) {
-          var semanaDefault = [];
-          for (var d = 0; d < 7; d++) {
-            semanaDefault.push([
-              { e: 18*60, s: 6*60, nd: true, per: 'noite' }
-            ]);
-          }
-          salvarEscalaCustom(val, semanaDefault);
-        }
-
-        renderConfigPostos();
-        renderEscalaSelectPostos();
-        updateHeaderBadge();
+      var normValCfg = norm(val);
+      var jaExisteCfg = cfg.postos.some(function(p) { return norm(p) === normValCfg; });
+      if (jaExisteCfg) {
+        if (typeof window.showToast === 'function') window.showToast('⚠️ Posto já está na lista.', 'error');
+        input.value = '';
+        return;
       }
+      cfg.postos.push(val);
+      saveConfig(cfg);
+
+      /* ── Garante escala padrão 24h para postos adicionados sem escala ── */
+      var temEscala = false;
+      for (var k in ESCALAS_POSTOS) {
+        if (norm(k) === normValCfg) { temEscala = true; break; }
+      }
+      if (!temEscala) {
+        var semanaDefault = [];
+        for (var d = 0; d < 7; d++) {
+          semanaDefault.push([
+            { e: 18*60, s: 6*60, nd: true, per: 'noite' }
+          ]);
+        }
+        salvarEscalaCustom(val, semanaDefault);
+      }
+
+      renderConfigPostos();
+      renderEscalaSelectPostos();
+      updateHeaderBadge();
       input.value = '';
     });
 
@@ -8741,7 +8721,6 @@ var FIRESTORE_DOC_ID     = 'dados';
     window._ftScheduledCheck  = scheduledCheck;
     window._ftCheckAndAlert   = checkAndAlert;
     window._ftUpdateBadge     = updateHeaderBadge;
-    window._ftGetPendencias   = getPendencias;   // usado pelo módulo FCM
 
     // _ftAlertRender: re-renderiza toda a UI de alertas com a config atual do localStorage
     window._ftAlertRender = function() {
@@ -8845,8 +8824,8 @@ var FIRESTORE_DOC_ID     = 'dados';
       btn.textContent = '\u2715';
       btn.title = 'Remover posto monitorado';
       btn.onclick = function() {
-        cfg.postos.splice(idx, 1); saveConfig(cfg);
-        renderBicoPostosMonitorados(); renderConfigPostos(); renderCadAlertasPostos(); updateHeaderBadge();
+        cfg.postos.splice(idx, 1); saveConfig(cfg); limparDadosOrfaosPosto(posto);
+        renderBicoPostosMonitorados(); renderConfigPostos(); renderCadAlertasPostos(); renderEscalaSelectPostos(); updateHeaderBadge();
         if (typeof window.showToast === 'function') window.showToast('\uD83D\uDDD1\uFE0F Posto removido dos monitorados.', 'error');
       };
 
@@ -9006,9 +8985,9 @@ var FIRESTORE_DOC_ID     = 'dados';
         btn.textContent = '\u2715';
         btn.title = 'Remover posto monitorado';
         btn.onclick = function() {
-          cfg.postos.splice(idx, 1); saveConfig(cfg);
+          cfg.postos.splice(idx, 1); saveConfig(cfg); limparDadosOrfaosPosto(posto);
           renderCadAlertasPostos(); renderCadAlertasToggles();
-          renderBicoPostosMonitorados(); renderConfigPostos(); updateHeaderBadge();
+          renderBicoPostosMonitorados(); renderConfigPostos(); renderEscalaSelectPostos(); updateHeaderBadge();
           if (typeof window.showToast === 'function') window.showToast('\uD83D\uDDD1\uFE0F Posto removido dos monitorados.', 'error');
         };
 
@@ -9453,8 +9432,8 @@ async function confirmarNovoCiclo() {
     var alertBadge = document.getElementById('ft-pending-header-badge');
     if (alertBadge) alertBadge.remove();
     // Atualiza badge do header (deve mostrar 0 pendências agora)
-    if (typeof window.updateHeaderBadge === 'function') {
-      try { window.updateHeaderBadge(); } catch(e) {}
+    if (typeof window._ftUpdateBadge === 'function') {
+      try { window._ftUpdateBadge(); } catch(e) {}
     }
 
     // ── 5. Fechar modal e notificar ───────────────────────────
