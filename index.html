@@ -7696,7 +7696,12 @@ var FIRESTORE_DOC_ID     = 'dados';
     try { localStorage.setItem(LS_CONFIG, JSON.stringify(cfg)); } catch (e) {}
     // Envia ao Firestore apenas quando mudança veio do usuário (não de snapshot remoto)
     if (!window._ftApplyingRemote) {
-      if (typeof window._ftAlertConfigSync === 'function') {
+      if (window.FT_Store) FT_Store.set(LS_CONFIG, cfg);
+      if (window.FT_SyncQueue) {
+        FT_SyncQueue.enqueue('set', LS_CONFIG, cfg).then(function() {
+          if (window.SyncEngine) SyncEngine.flush();
+        });
+      } else if (typeof window._ftAlertConfigSync === 'function') {
         try { window._ftAlertConfigSync(cfg); } catch (e) {}
       } else {
         // Firebase ainda não conectou — guarda para enviar assim que conectar
@@ -8305,9 +8310,17 @@ var FIRESTORE_DOC_ID     = 'dados';
     saveEscalasCustom(custom);
     // Atualiza ESCALAS_POSTOS em memória
     ESCALAS_POSTOS[postoNome] = { semana: semana };
-    // Sincroniza ft_escalas_custom com Firestore para outros dispositivos
-    if (typeof window._ftAlertConfigSync === 'function') {
-      // Reutiliza a bridge para gravar ft_escalas_custom junto
+    // Mantém IndexedDB (FT_Store) em sincronia com o localStorage
+    if (window.FT_Store) FT_Store.set('ft_escalas_custom', custom);
+    // Sincroniza com outros dispositivos usando o MESMO pipeline que o
+    // resto do app usa (fila offline-first + Firestore em tempo real),
+    // em vez de um caminho próprio que não tinha fila nem retry.
+    if (window.FT_SyncQueue) {
+      FT_SyncQueue.enqueue('set', 'ft_escalas_custom', custom).then(function() {
+        if (window.SyncEngine) SyncEngine.flush();
+      });
+    } else if (typeof window._ftAlertConfigSync === 'function') {
+      // Fallback legado, caso a fila offline não esteja disponível
       try {
         var upd = { ft_escalas_custom: custom };
         var col = window.FIRESTORE_COLLECTION || 'folga_trabalhada';
@@ -8454,6 +8467,12 @@ var FIRESTORE_DOC_ID     = 'dados';
         // Remove do ESCALAS_POSTOS em memória também
         delete ESCALAS_POSTOS[posto];
         saveEscalasCustom(custom);
+        if (window.FT_Store) FT_Store.set('ft_escalas_custom', custom);
+        if (window.FT_SyncQueue) {
+          FT_SyncQueue.enqueue('set', 'ft_escalas_custom', custom).then(function() {
+            if (window.SyncEngine) SyncEngine.flush();
+          });
+        }
         renderEscalaDiasList(posto);
         updateHeaderBadge();
         if (typeof window.showToast === 'function') window.showToast('🗑️ Escala removida.', 'success');
