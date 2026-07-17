@@ -8273,6 +8273,11 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
           p.postosTurnoInativo = {};
         if (typeof p.postosEscalaDia !== 'object' || Array.isArray(p.postosEscalaDia))
           p.postosEscalaDia = {};
+        // Data/hora em que cada posto foi adicionado à lista de monitorados —
+        // usado para isentar o posto do corte do "Novo Ciclo" quando ele foi
+        // adicionado DEPOIS do último ciclo (ver getPendencias).
+        if (typeof p.postosAdicionadoEm !== 'object' || Array.isArray(p.postosAdicionadoEm))
+          p.postosAdicionadoEm = {};
         return p;
       }
     } catch (e) {}
@@ -8533,7 +8538,15 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
         if (turno.periodo === 'noite' && !postoAlertaNoite(cfg, posto)) return;
 
         // ── Ignora turnos anteriores ao último Novo Ciclo ──
-        if (cicloInicioTs > 0) {
+        // EXCEÇÃO: se este posto foi adicionado aos monitorados DEPOIS do
+        // último "Novo Ciclo", ele nunca fez parte do ciclo anterior — não
+        // faz sentido aplicar o corte, ou o turno atual (ex.: plantão
+        // noturno já em andamento) nunca vira alerta até o próximo. Sem
+        // isso, marcar um posto como monitorado sempre ficava "mudo" até a
+        // próxima ocorrência do turno, mesmo com o turno já rolando.
+        var postoAdicionadoEm = (cfg.postosAdicionadoEm && cfg.postosAdicionadoEm[posto]) || 0;
+        var isentoDoCorte = postoAdicionadoEm > cicloInicioTs;
+        if (cicloInicioTs > 0 && !isentoDoCorte) {
           var turnoTs = new Date(turno.dataRef + 'T00:00:00').getTime() + turno.entrada * 60000;
           if (turnoTs < cicloInicioTs) return;
         }
@@ -9321,6 +9334,8 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
       var cfg = loadConfig();
       if (cfg.postos.indexOf(val) === -1) {
         cfg.postos.push(val);
+        if (!cfg.postosAdicionadoEm) cfg.postosAdicionadoEm = {};
+        cfg.postosAdicionadoEm[val] = Date.now();
         saveConfig(cfg);
 
         /* ── Garante escala padrão 24h para postos adicionados sem escala ── */
@@ -9742,6 +9757,8 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
         return;
       }
       cfg.postos.push(val);
+      if (!cfg.postosAdicionadoEm) cfg.postosAdicionadoEm = {};
+      cfg.postosAdicionadoEm[val] = Date.now();
       saveConfig(cfg);
 
       // Garante escala noturna padrão se não tiver escala (hardcoded nem custom)
@@ -9968,7 +9985,8 @@ window.diagSync = function () {
       alertarNoite:        (typeof remoto.alertarNoite === 'boolean') ? remoto.alertarNoite : (local.alertarNoite !== false),
       postosInativos:      mergeMapas(local.postosInativos,      remoto.postosInativos),
       postosTurnoInativo:  mergeMapas(local.postosTurnoInativo,  remoto.postosTurnoInativo),
-      postosEscalaDia:     mergeMapas(local.postosEscalaDia,     remoto.postosEscalaDia)
+      postosEscalaDia:     mergeMapas(local.postosEscalaDia,     remoto.postosEscalaDia),
+      postosAdicionadoEm:  mergeMapas(local.postosAdicionadoEm,  remoto.postosAdicionadoEm)
     };
   }
 
