@@ -7557,7 +7557,8 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
             // único para a config inteira faz uma edição feita em outro
             // dispositivo/aba (ex.: ligar/desligar um alerta) apagar um posto
             // recém-adicionado aqui, se aquele outro lugar ainda não tinha
-            // recebido a adição. Agora mescla os postos por união.
+            // recebido a adição. Agora mescla posto por posto, o mais
+            // recente vence (ver mergeAlertConfig / postosMeta).
             var _cfgFinal = (typeof window._ftMergeAlertConfig === 'function')
               ? window._ftMergeAlertConfig(localCfg || {}, remotoCfg)
               : remotoCfg; // fallback (não deveria ocorrer — função é registrada no load)
@@ -7565,6 +7566,20 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
             try { localStorage.setItem('ft_alert_config', JSON.stringify(_cfgFinal)); } catch(e) {}
             window._ftApplyingRemote = false;
             alertCfgAtualizado = true;
+
+            // ── Regrava a versão mesclada no Firestore quando ela difere do
+            //    que está lá agora. Sem isso, a cura só existia na memória
+            //    de QUEM recebeu o snapshot — um 3º aparelho que nunca teve
+            //    o posto localmente lia direto do servidor e nunca via a
+            //    mesclagem, só quando os dois primeiros "se encontrassem".
+            //    Agora quem detecta a diferença já republica, então o
+            //    servidor fica correto rapidamente para qualquer aparelho.
+            if (JSON.stringify(_cfgFinal) !== remotoRaw && typeof window._ftSalvarAlertConfigFirebase === 'function') {
+              var _tsHealed = Math.max(remoteTsCfg, localTsCfg) + 1;
+              try { localStorage.setItem('ft_alert_config_ts', String(_tsHealed)); } catch(e) {}
+              window._ftSalvarAlertConfigFirebase(_cfgFinal, _tsHealed);
+              remoteTsCfg = _tsHealed; // evita sobrescrever o ts abaixo com o valor antigo
+            }
           }
           try { localStorage.setItem('ft_alert_config_ts', String(remoteTsCfg)); } catch(e) {}
           }
@@ -8273,15 +8288,54 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
           p.postosTurnoInativo = {};
         if (typeof p.postosEscalaDia !== 'object' || Array.isArray(p.postosEscalaDia))
           p.postosEscalaDia = {};
-        // Data/hora em que cada posto foi adicionado à lista de monitorados —
-        // usado para isentar o posto do corte do "Novo Ciclo" quando ele foi
-        // adicionado DEPOIS do último ciclo (ver getPendencias).
-        if (typeof p.postosAdicionadoEm !== 'object' || Array.isArray(p.postosAdicionadoEm))
-          p.postosAdicionadoEm = {};
+        // ── postosMeta: { posto: { ativo: bool, ts: number } } ──────────
+        // BUG CORRIGIDO: "postos" era um array simples. Firestore não
+        // mescla arrays item a item — quando 2 aparelhos editavam a lista
+        // quase junto, o último a gravar substituía o array inteiro,
+        // apagando a mudança do outro. A "cura" por união (mergeAlertConfig
+        // antigo) evitava perder adições, mas não sabia representar
+        // REMOÇÕES — um posto removido num aparelho podia "ressuscitar" ao
+        // sincronizar com outro que ainda o tinha. Agora cada posto tem seu
+        // próprio timestamp (LWW por item, não por lista inteira): ligar/
+        // desligar monitoramento em qualquer aparelho converge certo nos
+        // outros, incluindo remoções.
+        if (typeof p.postosMeta !== 'object' || Array.isArray(p.postosMeta))
+          p.postosMeta = {};
+        // Migração: todo posto do array antigo que ainda não tem entrada em
+        // postosMeta ganha uma (usa postosAdicionadoEm como ts se existir).
+        p.postos.forEach(function(posto) {
+          var jaTem = Object.keys(p.postosMeta).some(function(k) { return norm(k) === norm(posto); });
+          if (!jaTem) {
+            var tsBase = (p.postosAdicionadoEm && p.postosAdicionadoEm[posto]) || 1;
+            p.postosMeta[posto] = { ativo: true, ts: tsBase };
+          }
+        });
+        // "postos" e "postosAdicionadoEm" passam a ser DERIVADOS de
+        // postosMeta — mantidos por compatibilidade com o resto do código
+        // que já lê esses dois campos diretamente.
+        p.postos = derivarPostosAtivos(p.postosMeta);
+        p.postosAdicionadoEm = derivarPostosAdicionadoEm(p.postosMeta);
         return p;
       }
     } catch (e) {}
-    return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+    var base = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+    base.postosMeta = {};
+    base.postos.forEach(function(posto) { base.postosMeta[posto] = { ativo: true, ts: 1 }; });
+    base.postosAdicionadoEm = derivarPostosAdicionadoEm(base.postosMeta);
+    return base;
+  }
+
+  // Deriva a lista de nomes ativos a partir do mapa postosMeta
+  function derivarPostosAtivos(postosMeta) {
+    var out = [];
+    for (var k in postosMeta) { if (postosMeta[k] && postosMeta[k].ativo) out.push(k); }
+    return out;
+  }
+  // Deriva o mapa posto→timestamp (só dos ativos) a partir de postosMeta
+  function derivarPostosAdicionadoEm(postosMeta) {
+    var out = {};
+    for (var k in postosMeta) { if (postosMeta[k] && postosMeta[k].ativo) out[k] = postosMeta[k].ts; }
+    return out;
   }
 
   function saveConfig(cfg) {
@@ -9223,7 +9277,13 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
       btnDel.type = 'button';
       btnDel.style.cssText = 'border:none;background:rgba(139,151,176,.1);color:#8b97b0;border-radius:7px;padding:3px 7px;font-size:.78rem;font-weight:700;cursor:pointer;';
       btnDel.textContent = '\u2715';
-      btnDel.onclick = function () { cfg.postos.splice(idx, 1); saveConfig(cfg); renderConfigPostos(); updateHeaderBadge(); };
+      btnDel.onclick = function () {
+        if (!cfg.postosMeta) cfg.postosMeta = {};
+        cfg.postosMeta[posto] = { ativo: false, ts: Date.now() };
+        cfg.postos = derivarPostosAtivos(cfg.postosMeta);
+        cfg.postosAdicionadoEm = derivarPostosAdicionadoEm(cfg.postosMeta);
+        saveConfig(cfg); renderConfigPostos(); updateHeaderBadge();
+      };
 
       linha1.appendChild(lbl);
       linha1.appendChild(btnDia2);
@@ -9334,8 +9394,10 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
       var cfg = loadConfig();
       if (cfg.postos.indexOf(val) === -1) {
         cfg.postos.push(val);
-        if (!cfg.postosAdicionadoEm) cfg.postosAdicionadoEm = {};
-        cfg.postosAdicionadoEm[val] = Date.now();
+        if (!cfg.postosMeta) cfg.postosMeta = {};
+        cfg.postosMeta[val] = { ativo: true, ts: Date.now() };
+        cfg.postos = derivarPostosAtivos(cfg.postosMeta);
+        cfg.postosAdicionadoEm = derivarPostosAdicionadoEm(cfg.postosMeta);
         saveConfig(cfg);
 
         /* ── Garante escala padrão 24h para postos adicionados sem escala ── */
@@ -9507,7 +9569,11 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
       btn.textContent = '\u2715';
       btn.title = 'Remover posto monitorado';
       btn.onclick = function() {
-        cfg.postos.splice(idx, 1); saveConfig(cfg);
+        if (!cfg.postosMeta) cfg.postosMeta = {};
+        cfg.postosMeta[posto] = { ativo: false, ts: Date.now() };
+        cfg.postos = derivarPostosAtivos(cfg.postosMeta);
+        cfg.postosAdicionadoEm = derivarPostosAdicionadoEm(cfg.postosMeta);
+        saveConfig(cfg);
         renderBicoPostosMonitorados(); renderConfigPostos(); renderCadAlertasPostos(); updateHeaderBadge();
         if (typeof window.showToast === 'function') window.showToast('\uD83D\uDDD1\uFE0F Posto removido dos monitorados.', 'error');
       };
@@ -9567,6 +9633,10 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
         return;
       }
       cfg.postos.push(val);
+      if (!cfg.postosMeta) cfg.postosMeta = {};
+      cfg.postosMeta[val] = { ativo: true, ts: Date.now() };
+      cfg.postos = derivarPostosAtivos(cfg.postosMeta);
+      cfg.postosAdicionadoEm = derivarPostosAdicionadoEm(cfg.postosMeta);
       saveConfig(cfg);
 
       /* ── Garante que o posto novo tem escala para gerar alertas ─────────
@@ -9680,7 +9750,17 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
         btn.textContent = '\u2715';
         btn.title = 'Remover posto monitorado';
         btn.onclick = function() {
-          cfg.postos.splice(idx, 1); saveConfig(cfg);
+          // BUG CORRIGIDO: antes só tirava do array `postos`, que em outro
+          // aparelho podia "voltar" via a mesclagem por união (não sabia
+          // representar remoção). Agora grava ativo:false com timestamp
+          // novo em postosMeta — vira a versão mais recente daquele posto
+          // específico e se propaga como remoção de verdade nos outros
+          // aparelhos, sem depender de quem sincroniza primeiro.
+          if (!cfg.postosMeta) cfg.postosMeta = {};
+          cfg.postosMeta[posto] = { ativo: false, ts: Date.now() };
+          cfg.postos = derivarPostosAtivos(cfg.postosMeta);
+          cfg.postosAdicionadoEm = derivarPostosAdicionadoEm(cfg.postosMeta);
+          saveConfig(cfg);
           renderCadAlertasPostos(); renderCadAlertasToggles();
           renderBicoPostosMonitorados(); renderConfigPostos(); updateHeaderBadge();
           if (typeof window.showToast === 'function') window.showToast('\uD83D\uDDD1\uFE0F Posto removido dos monitorados.', 'error');
@@ -9757,8 +9837,10 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
         return;
       }
       cfg.postos.push(val);
-      if (!cfg.postosAdicionadoEm) cfg.postosAdicionadoEm = {};
-      cfg.postosAdicionadoEm[val] = Date.now();
+      if (!cfg.postosMeta) cfg.postosMeta = {};
+      cfg.postosMeta[val] = { ativo: true, ts: Date.now() };
+      cfg.postos = derivarPostosAtivos(cfg.postosMeta);
+      cfg.postosAdicionadoEm = derivarPostosAdicionadoEm(cfg.postosMeta);
       saveConfig(cfg);
 
       // Garante escala noturna padrão se não tiver escala (hardcoded nem custom)
@@ -9970,23 +10052,69 @@ window.diagSync = function () {
     return out;
   }
 
-  // Mescla a config de alertas: une postos e os mapas internos,
-  // mantém os flags booleanos do lado remoto quando definidos.
+  // Cópias locais (mesmo cálculo do módulo de alertas, mas nesse escopo
+  // separado — window.diagSync não enxerga funções internas da outra IIFE).
+  function derivarPostosAtivosLocal(postosMeta) {
+    var out = [];
+    for (var k in postosMeta) { if (postosMeta[k] && postosMeta[k].ativo) out.push(k); }
+    return out;
+  }
+  function derivarPostosAdicionadoEmLocal(postosMeta) {
+    var out = {};
+    for (var k in postosMeta) { if (postosMeta[k] && postosMeta[k].ativo) out[k] = postosMeta[k].ts; }
+    return out;
+  }
+
+  // Mescla a config de alertas: uma posto vence por timestamp mais recente
+  // (LWW por item, não por lista inteira — permite remoção convergir de
+  // verdade), une os demais mapas internos, mantém os flags booleanos do
+  // lado remoto quando definidos.
   function mergeAlertConfig(local, remoto) {
     local  = local  || {};
     remoto = remoto || {};
-    var postosLocal  = Array.isArray(local.postos)  ? local.postos  : [];
-    var postosRemoto = Array.isArray(remoto.postos) ? remoto.postos : [];
-    var postosUnidos = postosLocal.slice();
-    postosRemoto.forEach(function (p) { if (postosUnidos.indexOf(p) === -1) postosUnidos.push(p); });
+    var metaLocal  = (local.postosMeta  && typeof local.postosMeta  === 'object') ? local.postosMeta  : {};
+    var metaRemoto = (remoto.postosMeta && typeof remoto.postosMeta === 'object') ? remoto.postosMeta : {};
+    // Fallback: se um dos lados ainda só tem o array antigo `postos` (sem
+    // postosMeta — versão anterior a esta correção), trata cada posto dele
+    // como ativo com timestamp 1 (bem antigo, perde para qualquer edição
+    // real feita já com a versão nova).
+    function comFallback(meta, arr) {
+      var out = {}; for (var k in meta) out[k] = meta[k];
+      (Array.isArray(arr) ? arr : []).forEach(function(p) {
+        var jaTem = Object.keys(out).some(function(k) { return norm(k) === norm(p); });
+        if (!jaTem) out[p] = { ativo: true, ts: 1 };
+      });
+      return out;
+    }
+    metaLocal  = comFallback(metaLocal,  local.postos);
+    metaRemoto = comFallback(metaRemoto, remoto.postos);
+
+    var metaFinal = {};
+    var todasChaves = {};
+    Object.keys(metaLocal).forEach(function(k)  { todasChaves[norm(k)] = k; });
+    Object.keys(metaRemoto).forEach(function(k) { if (!(norm(k) in todasChaves)) todasChaves[norm(k)] = k; });
+    Object.keys(todasChaves).forEach(function(nk) {
+      var nomeLocal  = Object.keys(metaLocal).filter(function(k){ return norm(k)===nk; })[0];
+      var nomeRemoto = Object.keys(metaRemoto).filter(function(k){ return norm(k)===nk; })[0];
+      var el = nomeLocal  ? metaLocal[nomeLocal]   : null;
+      var er = nomeRemoto ? metaRemoto[nomeRemoto] : null;
+      if (el && er) {
+        metaFinal[(er.ts >= el.ts) ? nomeRemoto : nomeLocal] = (er.ts >= el.ts) ? er : el;
+      } else {
+        var nome = el ? nomeLocal : nomeRemoto;
+        metaFinal[nome] = el || er;
+      }
+    });
+
     return {
-      postos:              postosUnidos,
+      postos:              derivarPostosAtivosLocal(metaFinal),
+      postosMeta:          metaFinal,
+      postosAdicionadoEm:  derivarPostosAdicionadoEmLocal(metaFinal),
       alertarDia:          (typeof remoto.alertarDia   === 'boolean') ? remoto.alertarDia   : (local.alertarDia   !== false),
       alertarNoite:        (typeof remoto.alertarNoite === 'boolean') ? remoto.alertarNoite : (local.alertarNoite !== false),
       postosInativos:      mergeMapas(local.postosInativos,      remoto.postosInativos),
       postosTurnoInativo:  mergeMapas(local.postosTurnoInativo,  remoto.postosTurnoInativo),
-      postosEscalaDia:     mergeMapas(local.postosEscalaDia,     remoto.postosEscalaDia),
-      postosAdicionadoEm:  mergeMapas(local.postosAdicionadoEm,  remoto.postosAdicionadoEm)
+      postosEscalaDia:     mergeMapas(local.postosEscalaDia,     remoto.postosEscalaDia)
     };
   }
 
