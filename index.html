@@ -267,6 +267,15 @@
     border: 1px solid rgba(69,170,242,.45);
     color: var(--accent3);
   }
+  #sync-status.error {
+    background: rgba(253,150,68,.15);
+    border: 1px solid rgba(253,150,68,.55);
+    color: var(--accent4);
+    cursor: pointer;
+  }
+  #sync-status.error .dot {
+    animation: pulse-dot .8s ease-in-out infinite;
+  }
   #sync-status .dot {
     width: 7px; height: 7px;
     border-radius: 50%;
@@ -298,6 +307,63 @@
     letter-spacing: .3px;
   }
   #pending-badge.visible { display: inline-flex; }
+  #pending-badge { cursor: pointer; }
+
+  /* Botão de diagnóstico */
+  #diag-sync-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(139,151,176,.12);
+    border: 1px solid rgba(139,151,176,.4);
+    color: #8b97b0;
+    font-size: .68rem;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 20px;
+    margin-top: 6px;
+    margin-left: 6px;
+    letter-spacing: .3px;
+    cursor: pointer;
+  }
+  #diag-sync-btn:active { opacity: .7; }
+
+  /* Painel de diagnóstico */
+  #diag-sync-panel {
+    display: none;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    max-height: 60vh;
+    background: #0b0f1a;
+    border-top: 1px solid rgba(69,170,242,.4);
+    z-index: 9999;
+    flex-direction: column;
+  }
+  #diag-sync-panel.visible { display: flex; }
+  #diag-sync-panel .diag-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255,255,255,.08);
+    flex-shrink: 0;
+  }
+  #diag-sync-panel .diag-head strong { color: #e7ecf5; font-size: .85rem; }
+  #diag-sync-panel .diag-close {
+    background: rgba(252,92,101,.15);
+    border: 1px solid rgba(252,92,101,.45);
+    color: #fc5c65;
+    font-size: .72rem;
+    font-weight: 700;
+    padding: 4px 12px;
+    border-radius: 14px;
+    cursor: pointer;
+  }
+  #diag-sync-log {
+    overflow-y: auto;
+    padding: 10px 14px 18px;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: .72rem;
+    line-height: 1.55;
+  }
 
   .tabs-wrapper {
     max-width: 480px;
@@ -2025,12 +2091,24 @@
     <span id="sync-status" class="online" title="Status da conexão">
       <span class="dot"></span><span id="sync-label">Online</span>
     </span>
-    <span id="pending-badge" title="Operações aguardando sincronização">
+    <span id="pending-badge" title="Toque para ver por que estas operações não sincronizaram" onclick="window.diagSync && window.diagSync()">
       ⏳ <span id="pending-count">0</span> pendente(s)
+    </span>
+    <span id="diag-sync-btn" title="Abrir diagnóstico de sincronização" onclick="window.diagSync && window.diagSync()">
+      🔧 Diagnóstico
     </span>
   </div>
 
 </header>
+
+<!-- Painel de diagnóstico de sincronização -->
+<div id="diag-sync-panel">
+  <div class="diag-head">
+    <strong>🔧 Diagnóstico de Sincronização</strong>
+    <span class="diag-close" onclick="document.getElementById('diag-sync-panel').classList.remove('visible')">Fechar</span>
+  </div>
+  <div id="diag-sync-log"></div>
+</div>
 
 <script>
 /* ── Layout do header: aplica estilo conforme largura da tela ── */
@@ -2305,11 +2383,6 @@
         🔔 Testar Alerta Agora
       </button>
 
-      <!-- Diagnóstico de sincronização -->
-      <button id="btn-diag-sync" type="button" onclick="window.diagSync()" style="margin-top:10px;width:100%;border:1px solid rgba(0,200,248,.35);background:rgba(0,200,248,.07);color:#00c8f8;border-radius:10px;padding:11px;font-size:.85rem;font-weight:700;cursor:pointer;letter-spacing:.3px;">
-        🔧 Diagnóstico &amp; Forçar Sync
-      </button>
-      <div id="diag-sync-log" style="display:none;margin-top:10px;background:#0d1117;border:1px solid #2a3347;border-radius:10px;padding:12px;font-size:.75rem;font-family:monospace;color:#8b97b0;max-height:280px;overflow-y:auto;line-height:1.7;"></div>
     </div>
 
   </div>
@@ -3182,6 +3255,8 @@
     _online: navigator.onLine,
     _syncing: false,
     _remoteHandler: null,  // fn(entry) → Promise<bool>
+    _lastSyncError: null,    // motivo da última falha ao gravar remoto (ex.: "permission-denied: ...")
+    _lastSyncErrorTs: null,
 
     // Registra o handler remoto (ex: Firebase)
     setRemote: function(fn) {
@@ -3194,17 +3269,30 @@
       var label = document.getElementById('sync-label');
       if (!el || !label) return;
       el.className = state;
-      var map = { online: 'Online', offline: 'Offline', syncing: 'Sincronizando…' };
+      var map = { online: 'Online', offline: 'Offline', syncing: 'Sincronizando…', error: 'Falha ao sincronizar' };
       label.textContent = map[state] || state;
+      if (state === 'error') {
+        el.onclick = function () { if (window.diagSync) window.diagSync(); };
+        el.title = this._lastSyncError
+          ? ('Falha ao gravar no Firestore: ' + this._lastSyncError + ' — toque para ver o diagnóstico')
+          : 'Toque para ver o diagnóstico';
+      } else {
+        el.onclick = null;
+        el.title = 'Status da conexão';
+      }
     },
 
     updateBadge: function() {
+      var self = this;
       FT_SyncQueue.count().then(function(n) {
         var badge = document.getElementById('pending-badge');
         var cnt   = document.getElementById('pending-count');
         if (!badge || !cnt) return;
         cnt.textContent = n;
         badge.classList.toggle('visible', n > 0);
+        badge.title = self._lastSyncError
+          ? ('Toque para diagnosticar — última falha: ' + self._lastSyncError)
+          : 'Toque para ver por que estas operações não sincronizaram';
       });
     },
 
@@ -3244,10 +3332,20 @@
         }, Promise.resolve());
       }).then(function() {
         self._syncing = false;
-        self.updateStatus(self._online ? 'online' : 'offline');
-        self.updateBadge();
-        // Notifica a UI que os dados podem ter mudado
-        if (typeof window.onSyncComplete === 'function') window.onSyncComplete(false);
+        // Antes disto, o status voltava para "Online" mesmo que itens tenham
+        // ficado presos na fila (ex.: gravação recusada pelo Firestore) —
+        // por isso o app mostrava "Online" e "14 pendente(s)" ao mesmo tempo,
+        // sem nenhum aviso de que algo estava errado. Agora, se sobrou algo
+        // na fila enquanto o dispositivo está online, mostramos "error".
+        return FT_SyncQueue.count().then(function(restantes) {
+          if (restantes > 0 && self._online) {
+            self.updateStatus('error');
+          } else {
+            self.updateStatus(self._online ? 'online' : 'offline');
+          }
+          self.updateBadge();
+          if (typeof window.onSyncComplete === 'function') window.onSyncComplete(false);
+        });
       }).catch(function() {
         self._syncing = false;
         self.updateStatus(self._online ? 'online' : 'offline');
@@ -3289,6 +3387,19 @@
         // Tenta um flush inicial se online
         if (navigator.onLine) self.flush();
       });
+
+      // ── Retry periódico ──────────────────────────────────
+      // Antes, uma falha de gravação (ex.: erro temporário do Firestore)
+      // só era tentada de novo quando o usuário salvava algo novo ou a
+      // conexão caía/voltava — então itens podiam ficar presos por horas
+      // sem nenhuma nova tentativa. Agora, a cada 30s, se está online e
+      // há algo pendente, tenta drenar a fila de novo automaticamente.
+      setInterval(function() {
+        if (!self._online || self._syncing) return;
+        FT_SyncQueue.count().then(function(n) {
+          if (n > 0) self.flush();
+        });
+      }, 30000);
     }
   };
 
@@ -7137,6 +7248,49 @@ var FIREBASE_CONFIG = {
 var FIRESTORE_COLLECTION = 'folga_trabalhada';
 var FIRESTORE_DOC_ID     = 'dados';
 
+// ── CORREÇÃO DE BUG: Firestore não aceita "arrays dentro de arrays" ──────
+//    ft_escalas_custom é um mapa { posto: semana }, onde semana é um array
+//    de 7 posições (um por dia da semana) e cada posição é, por sua vez,
+//    um array de turnos. Isso é um ARRAY DE ARRAYS, que o Firestore rejeita
+//    com o erro "Function DocumentReference.set() called with invalid data.
+//    Nested arrays are not supported". Era esse erro que impedia postos
+//    novos (com escala customizada, ex.: sem escala hardcoded em
+//    ESCALAS_POSTOS) de sincronizar entre dispositivos — a gravação no
+//    Firestore falhava silenciosamente (só aparecia no log de Diagnóstico).
+//    Solução: antes de gravar no Firestore, cada dia (array de turnos) é
+//    "embrulhado" em um objeto { turnos: [...] } — trocando um array de
+//    ARRAYS por um array de MAPS, que o Firestore aceita normalmente. Ao
+//    ler de volta do Firestore, desembrulhamos para o formato original.
+window._ftEncodeEscalas = function (custom) {
+  var out = {};
+  if (custom && typeof custom === 'object') {
+    for (var posto in custom) {
+      var semana = Array.isArray(custom[posto]) ? custom[posto] : [];
+      out[posto] = semana.map(function (turnosDoDia) {
+        return { turnos: Array.isArray(turnosDoDia) ? turnosDoDia : [] };
+      });
+    }
+  }
+  return out;
+};
+window._ftDecodeEscalas = function (encoded) {
+  var out = {};
+  if (encoded && typeof encoded === 'object') {
+    for (var posto in encoded) {
+      var semana = encoded[posto];
+      if (Array.isArray(semana)) {
+        out[posto] = semana.map(function (dia) {
+          if (Array.isArray(dia)) return dia; // compat: formato antigo já era array
+          return (dia && Array.isArray(dia.turnos)) ? dia.turnos : [];
+        });
+      } else {
+        out[posto] = [];
+      }
+    }
+  }
+  return out;
+};
+
 // Stubs — substituídos por implementações reais após Firebase conectar.
 // Evitam "window._ftSalvarEscalaFirebase is not a function" durante carregamento.
 window._ftSalvarEscalaFirebase = function(custom, ts) {
@@ -7203,9 +7357,19 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
           .collection(FIRESTORE_COLLECTION)
           .doc(FIRESTORE_DOC_ID)
           .set(update, { merge: true })
-          .then(function () { return true; })
+          .then(function () {
+            SyncEngine._lastSyncError   = null;
+            SyncEngine._lastSyncErrorTs = null;
+            return true;
+          })
           .catch(function (err) {
             console.warn('[FirebaseSync] Falha ao sincronizar:', err);
+            // Guarda o motivo real (ex.: permission-denied, doc > 1MB, etc.)
+            // para o painel de Diagnóstico poder mostrar ao usuário — antes
+            // esse erro só ia pro console e a fila ficava presa sem explicação.
+            SyncEngine._lastSyncError   = (err && (err.code || err.message)) ? (err.code ? err.code + ': ' : '') + (err.message || String(err)) : String(err);
+            SyncEngine._lastSyncErrorTs = Date.now();
+            if (window.SyncEngine) SyncEngine.updateStatus('error');
             return false;
           });
       });
@@ -7258,7 +7422,7 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
       try {
         var col = FIRESTORE_COLLECTION || 'folga_trabalhada';
         var did = FIRESTORE_DOC_ID     || 'dados';
-        var updEsc = { ft_escalas_custom: window._ftEscalaCustomPending };
+        var updEsc = { ft_escalas_custom: window._ftEncodeEscalas(window._ftEscalaCustomPending) };
         if (window._ftEscalaCustomPendingTs) updEsc['ft_escalas_custom_ts'] = window._ftEscalaCustomPendingTs;
         db.collection(col).doc(did)
           .set(updEsc, { merge: true })
@@ -7301,9 +7465,24 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
           var remoteTsEsc = parseInt(data['ft_escalas_custom_ts'] || 0, 10) || 0;
           var localTsEsc  = parseInt(localStorage.getItem('ft_escalas_custom_ts') || '0', 10) || 0;
           if (remoteTsEsc > localTsEsc) {  // FIX: > evita snapshot sobrescrever edição local com mesmo ts
-            try { localStorage.setItem('ft_escalas_custom', JSON.stringify(data['ft_escalas_custom'])); } catch (e) {}
+            var _escDecoded = window._ftDecodeEscalas(data['ft_escalas_custom']);
+            // BUG CORRIGIDO: antes isto SUBSTITUÍA o mapa inteiro de escalas
+            // pelo valor remoto. Como o timestamp é único para o mapa todo,
+            // uma edição em QUALQUER outro posto, feita em outro dispositivo/
+            // aba que ainda não tivesse recebido um posto novo adicionado
+            // aqui, apagava esse posto ao chegar (mesmo tendo um timestamp
+            // "mais novo" só por causa da OUTRA edição). Agora mescla por
+            // união (mesma lógica seguIDA pelo botão Diagnóstico) em vez de
+            // substituir — nenhum posto local é perdido só porque um
+            // snapshot mais novo chegou sobre um posto diferente.
+            var _escAtualLocal = null;
+            try { _escAtualLocal = JSON.parse(localStorage.getItem('ft_escalas_custom') || '{}'); } catch(e) {}
+            var _escFinal = (typeof window._ftMergeEscalasCustom === 'function')
+              ? window._ftMergeEscalasCustom(_escAtualLocal || {}, _escDecoded)
+              : _escDecoded; // fallback (não deveria ocorrer — função é registrada no load)
+            try { localStorage.setItem('ft_escalas_custom', JSON.stringify(_escFinal)); } catch (e) {}
             try { localStorage.setItem('ft_escalas_custom_ts', String(remoteTsEsc)); } catch (e) {}
-            if (window.FT_Store) FT_Store.set('ft_escalas_custom', data['ft_escalas_custom']);
+            if (window.FT_Store) FT_Store.set('ft_escalas_custom', _escFinal);
             chavesAtualizadas.push('ft_escalas_custom');
             escalasAtualizadas = true;
           }
@@ -7328,8 +7507,17 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
                           !== JSON.stringify(((localCfg||{}).postos||[]).slice().sort());
           var outroCampo  = JSON.stringify(remotoCfg) !== JSON.stringify(localCfg);
           if (postosDifere || outroCampo) {
+            // BUG CORRIGIDO: antes isto gravava o objeto remoto inteiro por
+            // cima do local. Mesma causa do bug de escalas acima: timestamp
+            // único para a config inteira faz uma edição feita em outro
+            // dispositivo/aba (ex.: ligar/desligar um alerta) apagar um posto
+            // recém-adicionado aqui, se aquele outro lugar ainda não tinha
+            // recebido a adição. Agora mescla os postos por união.
+            var _cfgFinal = (typeof window._ftMergeAlertConfig === 'function')
+              ? window._ftMergeAlertConfig(localCfg || {}, remotoCfg)
+              : remotoCfg; // fallback (não deveria ocorrer — função é registrada no load)
             window._ftApplyingRemote = true;
-            try { localStorage.setItem('ft_alert_config', remotoRaw); } catch(e) {}
+            try { localStorage.setItem('ft_alert_config', JSON.stringify(_cfgFinal)); } catch(e) {}
             window._ftApplyingRemote = false;
             alertCfgAtualizado = true;
           }
@@ -7401,7 +7589,7 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
         var col = window.FIRESTORE_COLLECTION || 'folga_trabalhada';
         var did = window.FIRESTORE_DOC_ID     || 'dados';
         db.collection(col).doc(did)
-          .set({ ft_escalas_custom: custom, ft_escalas_custom_ts: ts || Date.now() }, { merge: true })
+          .set({ ft_escalas_custom: window._ftEncodeEscalas(custom), ft_escalas_custom_ts: ts || Date.now() }, { merge: true })
           .then(function() {
             console.log('[EscalaSync] ✅ Escala salva no Firebase');
             if (typeof window.showToast === 'function') window.showToast('☁️ Escala salva no Firebase!', 'success');
@@ -8676,7 +8864,7 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
     // ── Enfileira também na fila (fallback/offline) ──────────────────
     if (window.FT_SyncQueue) {
       FT_SyncQueue.enqueue('set', '__escalas_payload__',
-        { ft_escalas_custom: custom, ft_escalas_custom_ts: _ts }
+        { ft_escalas_custom: window._ftEncodeEscalas(custom), ft_escalas_custom_ts: _ts }
       ).then(function() {
         if (window.SyncEngine) SyncEngine.flush();
       });
@@ -8823,7 +9011,7 @@ window._ftSalvarAlertConfigFirebase = function(cfg, ts) {
         window._ftSalvarEscalaFirebase(custom, _tsLimpar);
         if (window.FT_SyncQueue) {
           FT_SyncQueue.enqueue('set', '__escalas_payload__',
-            { ft_escalas_custom: custom, ft_escalas_custom_ts: _tsLimpar }
+            { ft_escalas_custom: window._ftEncodeEscalas(custom), ft_escalas_custom_ts: _tsLimpar }
           ).then(function() {
             if (window.SyncEngine) SyncEngine.flush();
           });
@@ -9628,9 +9816,10 @@ function toggleAcc(id) {
    re-renderiza toda a UI — sem precisar recarregar a página.
    ══════════════════════════════════════════════════════════ */
 window.diagSync = function () {
+  var panel = document.getElementById('diag-sync-panel');
   var log = document.getElementById('diag-sync-log');
   if (!log) return;
-  log.style.display = 'block';
+  if (panel) panel.classList.add('visible');
   log.innerHTML = '';
   function line(msg, cor) {
     var d = document.createElement('div');
@@ -9738,6 +9927,22 @@ window.diagSync = function () {
     };
   }
 
+  // ── Expõe as mesclagens seguras (união, nunca substituição total) para o
+  //    listener onSnapshot em tempo real (definido em outro IIFE, mais acima
+  //    no arquivo). BUG CORRIGIDO: o listener em tempo real aplicava os dados
+  //    remotos com uma SUBSTITUIÇÃO TOTAL do objeto (localStorage.setItem com
+  //    o valor remoto inteiro) sempre que o timestamp remoto era mais novo.
+  //    Isso é seguro só quando o timestamp cobre exatamente o que mudou — mas
+  //    como o timestamp é ÚNICO para o mapa inteiro (todos os postos), uma
+  //    edição feita em QUALQUER outro posto, em QUALQUER outro dispositivo/aba
+  //    que ainda não tivesse recebido a adição mais recente, sobrescrevia (e
+  //    apagava) o posto recém-adicionado em todos os aparelhos — mesmo sem
+  //    ninguém tocar nele. Expondo a mesma mesclagem por união usada aqui no
+  //    Diagnóstico, o listener passa a nunca mais descartar dados só porque
+  //    chegaram "depois" de uma edição feita em outro lugar.
+  window._ftMergeEscalasCustom = mergeEscalasCustom;
+  window._ftMergeAlertConfig   = mergeAlertConfig;
+
   function lerLocal(key, isMapa) {
     try { return JSON.parse(localStorage.getItem(key) || (isMapa ? '{}' : '[]')); }
     catch (e) { return isMapa ? {} : []; }
@@ -9749,6 +9954,26 @@ window.diagSync = function () {
   }
 
   line('▶ Iniciando diagnóstico e sincronização completa...', '#00c8f8');
+
+  // ── Estado atual da fila local e do motor de sync ──────────
+  line('📶 Internet do dispositivo (navigator.onLine): ' + (navigator.onLine ? 'sim' : 'não'), navigator.onLine ? '#26de81' : '#fc5c65');
+  if (window.SyncEngine) {
+    line('🔌 Handler remoto (Firebase) registrado: ' + (SyncEngine._remoteHandler ? 'sim' : 'NÃO'), SyncEngine._remoteHandler ? '#26de81' : '#fc5c65');
+    if (SyncEngine._lastSyncError) {
+      var quando = SyncEngine._lastSyncErrorTs ? new Date(SyncEngine._lastSyncErrorTs).toLocaleTimeString('pt-BR') : '?';
+      line('❌ Último erro ao gravar no Firestore (' + quando + '): ' + SyncEngine._lastSyncError, '#fc5c65');
+    }
+  }
+  if (window.FT_SyncQueue) {
+    FT_SyncQueue.getAll().then(function (fila) {
+      if (!fila.length) { line('✅ Fila local de sincronização: vazia (0 pendente)', '#26de81'); return; }
+      line('⏳ Fila local de sincronização: ' + fila.length + ' operações presas:', '#f7b731');
+      fila.forEach(function (item) {
+        var quando = item.ts ? new Date(item.ts).toLocaleString('pt-BR') : '?';
+        line('   • [' + quando + '] ' + item.op + ' → ' + item.store, '#8b97b0');
+      });
+    });
+  }
 
   if (typeof firebase === 'undefined') {
     line('❌ firebase SDK NÃO carregado! Verifique sua conexão.', '#fc5c65');
@@ -9801,10 +10026,18 @@ window.diagSync = function () {
 
       // ── Mescla escalas customizadas ──
       var escLocal  = lerLocal(MAPA, true);
-      var escRemoto = (data[MAPA] && typeof data[MAPA] === 'object') ? data[MAPA] : {};
+      var escRemotoRaw = (data[MAPA] && typeof data[MAPA] === 'object') ? data[MAPA] : {};
+      var escRemoto = window._ftDecodeEscalas(escRemotoRaw);
       var escMesclado = mergeEscalasCustom(escLocal, escRemoto);
-      upd[MAPA] = escMesclado;
+      upd[MAPA] = window._ftEncodeEscalas(escMesclado);
+      // BUG CORRIGIDO: sem isto, o campo _ts no Firestore ficava parado no
+      // valor antigo (merge:true não atualiza um campo que não é enviado).
+      // O dispositivo que recebe o snapshot compara os timestamps para
+      // decidir se aplica o dado remoto — com o _ts desatualizado, a
+      // escala nova era ignorada mesmo chegando corretamente ao Firestore.
+      upd[MAPA + '_ts'] = Date.now();
       gravarLocal(MAPA, escMesclado);
+      try { localStorage.setItem(MAPA + '_ts', String(upd[MAPA + '_ts'])); } catch (e) {}
       line('🔀 ' + MAPA + ': ' + Object.keys(escMesclado).length + ' posto(s) com escala customizada', '#26de81');
 
       // ── Mescla config de alertas ──
@@ -9812,9 +10045,12 @@ window.diagSync = function () {
       var cfgRemoto = (data[CFG] && typeof data[CFG] === 'object') ? data[CFG] : {};
       var cfgMesclado = mergeAlertConfig(cfgLocal, cfgRemoto);
       upd[CFG] = cfgMesclado;
+      // BUG CORRIGIDO: mesmo motivo acima, agora para a lista de postos monitorados.
+      upd[CFG + '_ts'] = Date.now();
       window._ftApplyingRemote = true;
       gravarLocal(CFG, cfgMesclado);
       window._ftApplyingRemote = false;
+      try { localStorage.setItem(CFG + '_ts', String(upd[CFG + '_ts'])); } catch (e) {}
       line('🔀 ' + CFG + ': ' + cfgMesclado.postos.length + ' posto(s) monitorado(s): ' + cfgMesclado.postos.join(', '), '#26de81');
 
       line('⬆️ Gravando dados mesclados no Firestore (todos os dispositivos vão receber)...', '#00c8f8');
