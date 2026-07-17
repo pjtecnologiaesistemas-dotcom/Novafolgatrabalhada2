@@ -3310,9 +3310,52 @@
       self._syncing = true;
       self.updateStatus('syncing');
 
+      // ── Watchdog: destrava _syncing se o flush ficar preso por muito
+      //    tempo. CAUSA RAIZ ENCONTRADA: se uma gravação no Firestore
+      //    trava (não resolve NEM rejeita — comum com rede instável/5G
+      //    fraco), _syncing ficava true para sempre e NENHUM flush
+      //    futuro rodava de novo — nem o retry automático — mesmo sem
+      //    nenhum erro visível. Foi assim que 14 edições em sequência
+      //    ficaram presas sem gerar nenhum "❌ erro" no diagnóstico: a
+      //    primeira travou e as seguintes só se acumularam na fila.
+      clearTimeout(self._watchdogId);
+      self._watchdogId = setTimeout(function() {
+        if (self._syncing) {
+          console.warn('[SyncEngine] Watchdog: flush travado há 25s — destravando.');
+          self._syncing = false;
+          self.updateStatus(self._online ? 'error' : 'offline');
+        }
+      }, 25000);
+
+      // Envolve uma promise com timeout — se a operação remota não
+      // responder em 12s, trata como falha (mantém na fila) e segue
+      // para o próximo item, em vez de travar a fila inteira.
+      function comTimeout(promise, ms) {
+        return new Promise(function(resolve) {
+          var done = false;
+          var timer = setTimeout(function() {
+            if (done) return;
+            done = true;
+            resolve(false); // trata timeout como falha — mantém na fila
+          }, ms);
+          promise.then(function(ok) {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve(ok);
+          }).catch(function() {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve(false);
+          });
+        });
+      }
+
       return FT_SyncQueue.getAll().then(function(entries) {
         if (!entries.length) {
           self._syncing = false;
+          clearTimeout(self._watchdogId);
           self.updateStatus('online');
           return;
         }
@@ -3325,13 +3368,14 @@
               ? self._remoteHandler(entry)
               : Promise.resolve(true);
 
-            return handler.then(function(ok) {
+            return comTimeout(handler, 12000).then(function(ok) {
               if (ok !== false) return FT_SyncQueue.remove(entry.qid);
-            }).catch(function() { /* mantém na fila se falhar */ });
+            });
           });
         }, Promise.resolve());
       }).then(function() {
         self._syncing = false;
+        clearTimeout(self._watchdogId);
         // Antes disto, o status voltava para "Online" mesmo que itens tenham
         // ficado presos na fila (ex.: gravação recusada pelo Firestore) —
         // por isso o app mostrava "Online" e "14 pendente(s)" ao mesmo tempo,
@@ -3348,6 +3392,7 @@
         });
       }).catch(function() {
         self._syncing = false;
+        clearTimeout(self._watchdogId);
         self.updateStatus(self._online ? 'online' : 'offline');
       });
     },
